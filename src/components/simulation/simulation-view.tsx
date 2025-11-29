@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Send, Gavel, User, FileText, AlertCircle, Shield, Scale, Mic, Eye, File, Clock, Briefcase, Award, TrendingUp, Info, ChevronDown, ChevronUp, Expand, Minimize2, RotateCcw, Ban } from "lucide-react";
+import { Send, Gavel, User, FileText, AlertCircle, Shield, Scale, Mic, Eye, File, Clock, TrendingUp, ChevronDown, ChevronUp, RotateCcw, Ban } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { saveMessage, getSimulationHistory, acceptCase, getCaseAcceptanceStatus, resetSimulation } from "@/lib/actions";
 import CaseIntakeView from "./case-intake-view";
@@ -1339,7 +1339,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                                                     : "neo-inset rounded-tl-none"
                                                 }`}>
                                                 <div className="break-words">
-                                                    {content.split('\n').map((line, idx) => {
+                                                    {content.split('\n').map((line: string, idx: number) => {
                                                         const trimmedLine = line.trim();
 
                                                         // Empty line - add spacing
@@ -1493,7 +1493,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
     );
 }
 
-function Badge({ children, className, variant }: { children: React.ReactNode, className?: string, variant?: string }) {
+function Badge({ children, className }: { children: React.ReactNode, className?: string, variant?: string }) {
     return (
         <span className={cn("inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2", className)}>
             {children}
