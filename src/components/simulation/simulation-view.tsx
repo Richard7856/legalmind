@@ -22,6 +22,10 @@ export default function SimulationView({ caseId }: { caseId: string }) {
     const [presentationStarted, setPresentationStarted] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
+    // Track if presentation has been initialized to prevent duplicate initialization
+    const hasInitializedPresentation = useRef(false);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+
     // Store caseId in a ref so we can access it in the fetch interceptor
     const caseIdRef = useRef(caseId);
     useEffect(() => {
@@ -326,6 +330,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
 
     // Load history on mount
     useEffect(() => {
+        setIsLoadingHistory(true);
         const loadHistory = async () => {
             const history = await getSimulationHistory(caseId);
             if (history.length > 0) {
@@ -336,6 +341,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                 }));
                 setMessages(loadedMessages);
                 setPresentationStarted(true); // Mark as started if history exists
+                hasInitializedPresentation.current = true; // Mark as initialized to prevent duplicate initialization
 
                 // Extract trial events from history
                 extractTrialEvents(loadedMessages);
@@ -343,10 +349,11 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                 // Reset presentation flag if no history - allow presentation to start
                 setPresentationStarted(false);
             }
+            setIsLoadingHistory(false);
         };
         loadHistory();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [caseId, setMessages]);
+    }, [caseId]);
 
     // Extract trial events, evidence, and testimonies from messages
     const extractTrialEvents = (msgs: typeof messages) => {
@@ -431,9 +438,23 @@ export default function SimulationView({ caseId }: { caseId: string }) {
 
     // Auto-start presentation phase if no messages exist and case is accepted
     useEffect(() => {
+        // Prevent duplicate initialization - check if already initialized
+        if (hasInitializedPresentation.current) {
+            console.log("Presentation already initialized, skipping...");
+            return;
+        }
+
+        // Wait for history to finish loading before starting presentation
+        if (isLoadingHistory) {
+            console.log("Still loading history, waiting...");
+            return;
+        }
+
         // Only start if case is accepted, no messages exist, presentation hasn't started, and not currently loading
         if (caseAccepted === true && messages.length === 0 && !presentationStarted && !isStreaming && input === "") {
-            console.log("Starting presentation phase for case:", caseId, "messages.length:", messages.length, "presentationStarted:", presentationStarted);
+            console.log("Starting presentation phase for case (ONCE):", caseId, "messages.length:", messages.length, "presentationStarted:", presentationStarted);
+            hasInitializedPresentation.current = true; // Mark as initialized immediately to prevent duplicate calls
+
             // Start with presentation phase - introduce parties and case
             const timer = setTimeout(() => {
                 setPresentationStarted(true); // Mark as started once timer kicks in
@@ -477,7 +498,6 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                         } else {
                             // Custom case - use generic presentation
                             const caseCategory = caseInfo?.category || "PENAL";
-                            const caseTitle = caseInfo?.title || "Caso Personalizado";
                             const isLaboral = caseCategory === "LABORAL";
 
                             presentationMessages = [
@@ -660,7 +680,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                                                         ));
 
                                                         // Save and stop
-                                                        await saveMessage(caseId, "assistant" as any, cleanText);
+                                                        await saveMessage(caseId, "system", cleanText);
                                                         reader.cancel();
                                                         setIsPresenting(false);
                                                         return;
@@ -706,7 +726,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                                     }
                                     // Save the final message
                                     if (accumulatedText.trim()) {
-                                        await saveMessage(caseId, "assistant" as any, accumulatedText.trim());
+                                        await saveMessage(caseId, "system", accumulatedText.trim());
                                     }
                                 } catch (e) {
                                     console.error("Error reading stream:", e);
@@ -721,12 +741,13 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                     } catch (error) {
                         console.error("Error in presentation sequence:", error);
                         setPresentationStarted(false); // Reset on error to allow retry
+                        hasInitializedPresentation.current = false; // Reset initialization flag on error
                     }
                 })();
             }, 500); // Start presentation after 500ms
             return () => clearTimeout(timer);
         }
-    }, [caseAccepted, messages, messages.length, isStreaming, input, caseId, presentationStarted]);
+    }, [caseAccepted, messages.length, isStreaming, input, presentationStarted, isLoadingHistory, caseId]);
 
     useEffect(() => {
         if (scrollRef.current) {
