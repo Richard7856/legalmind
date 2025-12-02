@@ -68,29 +68,51 @@ export default function SimulationView({ caseId }: { caseId: string }) {
     const [messages, setMessages] = useState<Message[]>([]);
     const [isStreaming, setIsStreaming] = useState(false);
     const [isUserTurn, setIsUserTurn] = useState(true); // Detecta si es el turno del usuario
+    const [isPresenting, setIsPresenting] = useState(false); // Detecta si está en fase de presentación inicial
     const autoContinueCount = useRef(0); // Track consecutive auto-continues
+    const autoContinueTimeout = useRef<NodeJS.Timeout | null>(null); // Track pending timeout
 
     // Track saved message IDs to avoid duplicates
     const savedMessageIds = useRef<Set<string>>(new Set());
+
+    // Función para normalizar texto para comparación
+    const normalizeContent = (text: string): string => {
+        return text
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .replace(/[\n\r]+/g, ' ')
+            .trim();
+    };
 
     // Función para detectar si es el turno del usuario
     const detectUserTurn = (messageContent: string): boolean => {
         const content = messageContent.toLowerCase();
 
-        // Patrones que indican que es el turno del usuario (defensa)
+        // EXPLICIT BLOCK: If Judge says "wait", it's NOT user turn
+        if (content.includes('después será su turno') || content.includes('despues sera su turno')) {
+            return false;
+        }
+
+        // Patrones que indican que es el turno del usuario (defensa/empresa)
         const userTurnPatterns = [
-            'defensa, después será su turno',
             'defensa, proceda',
             'abogado, proceda',
             'defensa, tiene la palabra',
             'abogado de la defensa',
+            'abogado de la empresa',
             'su turno, defensa',
+            'su turno, abogado',
             'defensa, puede',
             'abogado, puede',
-            'defensa?', // Cuando le preguntan a la defensa
+            'defensa?',
             'abogado?',
             'defensa, adelante',
-            'abogado, adelante'
+            'abogado, adelante',
+            'su turno.',
+            'es su turno',
+            'su turno para presentar',
+            'su turno para',
+            'tiene la palabra'
         ];
 
         // Si encuentra alguno de estos patrones, es turno del usuario
@@ -100,6 +122,12 @@ export default function SimulationView({ caseId }: { caseId: string }) {
     // Log status changes and message updates
     useEffect(() => {
         console.log("Streaming status:", isStreaming, "messages count:", messages.length);
+
+        // Si estamos streaming o presentando, no hacer nada
+        if (isStreaming || isPresenting) {
+            return;
+        }
+
         if (messages.length > 0) {
             const lastMsg = messages[messages.length - 1];
             const content = getMessageContent(lastMsg);
@@ -107,7 +135,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
             // Auto-save assistant messages when they have content
             if (lastMsg.role === "assistant" && content && content.trim() && content.length > 10) {
                 // Save when ready (not streaming) and we haven't saved this message yet
-                if (!isStreaming && !savedMessageIds.current.has(lastMsg.id)) {
+                if (!savedMessageIds.current.has(lastMsg.id)) {
                     console.log("Auto-saving assistant message:", lastMsg.id, "content length:", content.length);
                     savedMessageIds.current.add(lastMsg.id);
                     saveMessage(caseId, "system", content).catch(err => {
@@ -119,18 +147,26 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                 // Detectar si es el turno del usuario
                 const userTurn = detectUserTurn(content);
 
-                // Si detectamos turno de usuario, reseteamos el contador
+                // Si detectamos turno de usuario, reseteamos el contador y cancelamos timeout
                 if (userTurn) {
+                    console.log("User turn detected - canceling any pending auto-continue");
                     autoContinueCount.current = 0;
                     setIsUserTurn(true);
-                } else {
-                    setIsUserTurn(false);
+
+                    // Cancelar timeout pendiente si existe
+                    if (autoContinueTimeout.current) {
+                        clearTimeout(autoContinueTimeout.current);
+                        autoContinueTimeout.current = null;
+                    }
+                    return;
                 }
 
-                console.log("User turn detected:", userTurn, "Auto-continue count:", autoContinueCount.current);
+                // No es turno del usuario
+                setIsUserTurn(false);
+                console.log("Not user turn. Auto-continue count:", autoContinueCount.current);
 
-                // Si NO es el turno del usuario y NO estamos streaming, auto-continuar
-                if (!userTurn && !isStreaming && lastMsg.role === "assistant") {
+                // Si NO es el turno del usuario, auto-continuar
+                if (lastMsg.role === "assistant") {
                     // Safety check: prevent infinite loops
                     if (autoContinueCount.current >= 4) {
                         console.warn("Max auto-continue limit reached. Forcing user turn.");
@@ -139,15 +175,24 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                         return;
                     }
 
-                    console.log("Not user's turn - auto-continuing simulation...");
+                    // Si ya hay un timeout pendiente, no crear otro
+                    if (autoContinueTimeout.current) {
+                        console.log("Auto-continue already scheduled, skipping");
+                        return;
+                    }
+
+                    console.log("Scheduling auto-continue in 1.5s...");
                     autoContinueCount.current += 1;
 
                     // Capturar el estado actual de mensajes ANTES del setTimeout
                     const currentMessages = messages;
+                    const currentCount = autoContinueCount.current;
 
                     // Esperar un poco para que el usuario pueda leer el mensaje
-                    setTimeout(async () => {
+                    autoContinueTimeout.current = setTimeout(async () => {
                         try {
+                            console.log("Auto-continue timeout fired. Count:", currentCount);
+                            autoContinueTimeout.current = null;
                             setIsStreaming(true);
 
                             // Llamar al API SIN agregar mensaje del usuario
@@ -221,22 +266,32 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                                 };
                                 setMessages(prev => [...prev, finalMsg]);
                             } else {
-                                for (let i = 0; i < roleSeparatedMessages.length; i++) {
-                                    const roleMsg = roleSeparatedMessages[i];
+                                // Deduplicate messages before adding
+                                setMessages(prev => {
+                                    const existingContents = new Set(prev.map(m => normalizeContent(getMessageContent(m))));
+                                    const newMessages = [...prev];
 
-                                    if (i > 0) {
-                                        await new Promise(resolve => setTimeout(resolve, 800));
+                                    for (let i = 0; i < roleSeparatedMessages.length; i++) {
+                                        const roleMsg = roleSeparatedMessages[i];
+                                        const normalizedContent = normalizeContent(roleMsg.content);
+
+                                        if (!existingContents.has(normalizedContent)) {
+                                            const assistantMsgId = crypto.randomUUID();
+                                            const finalMsg: Message = {
+                                                id: assistantMsgId,
+                                                role: "assistant",
+                                                content: roleMsg.content,
+                                                parts: [{ type: "text", text: roleMsg.content }]
+                                            };
+                                            newMessages.push(finalMsg);
+                                            existingContents.add(normalizedContent);
+                                        } else {
+                                            console.log("Skipping duplicate:", roleMsg.content.substring(0, 50));
+                                        }
                                     }
 
-                                    const assistantMsgId = crypto.randomUUID();
-                                    const finalMsg: Message = {
-                                        id: assistantMsgId,
-                                        role: "assistant",
-                                        content: roleMsg.content,
-                                        parts: [{ type: "text", text: roleMsg.content }]
-                                    };
-                                    setMessages(prev => [...prev, finalMsg]);
-                                }
+                                    return newMessages;
+                                });
                             }
 
                             setIsStreaming(false);
@@ -249,7 +304,16 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                 }
             }
         }
-    }, [isStreaming, messages, caseId]);
+
+        // Cleanup function
+        return () => {
+            if (autoContinueTimeout.current) {
+                console.log("Cleaning up auto-continue timeout");
+                clearTimeout(autoContinueTimeout.current);
+                autoContinueTimeout.current = null;
+            }
+        };
+    }, [isStreaming, messages, caseId, isPresenting]);
 
     // Check case acceptance status on mount
     useEffect(() => {
@@ -373,6 +437,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
             // Start with presentation phase - introduce parties and case
             const timer = setTimeout(() => {
                 setPresentationStarted(true); // Mark as started once timer kicks in
+                setIsPresenting(true); // Bloquear auto-continue durante la presentación
                 console.log("Timer fired! Starting presentation sequence...");
                 (async () => {
                     try {
@@ -554,6 +619,54 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                                             if (text) {
                                                 accumulatedText += text;
 
+                                                // FRONTEND FILTER: Detect duplicate summary or merged messages
+                                                // 1. Detect duplicate summary
+                                                if (accumulatedText.length > 50 &&
+                                                    !accumulatedText.includes("**Caso:**") &&
+                                                    (accumulatedText.toLowerCase().includes("resumen del caso") ||
+                                                        accumulatedText.toLowerCase().includes("procederé a presentar"))) {
+
+                                                    // Check if we already have a structured summary in history
+                                                    const hasStructuredSummary = messages.some(m =>
+                                                        (m.content || "").includes("**Caso:**") || (m.content || "").includes("**Hechos:**")
+                                                    );
+
+                                                    if (hasStructuredSummary) {
+                                                        console.warn("BLOCKED DUPLICATE SUMMARY in frontend");
+                                                        setMessages(prev => prev.filter(m => m.id !== judgeMsgId));
+                                                        reader.cancel();
+                                                        setIsPresenting(false);
+                                                        return;
+                                                    }
+                                                }
+
+                                                // 2. Detect MERGED MESSAGES (Judge + Prosecutor in one)
+                                                // If we see [Fiscal] or [Defensa] while presenting, CUT IT OFF
+                                                if (accumulatedText.includes("[Fiscal]") || accumulatedText.includes("[Defensa]")) {
+                                                    console.warn("DETECTED MERGED MESSAGE - Cutting off stream");
+
+                                                    // Keep only the text BEFORE the new role tag
+                                                    const splitIndex = accumulatedText.indexOf("[Fiscal]");
+                                                    const cutIndex = splitIndex !== -1 ? splitIndex : accumulatedText.indexOf("[Defensa]");
+
+                                                    if (cutIndex !== -1) {
+                                                        const cleanText = accumulatedText.substring(0, cutIndex).trim();
+
+                                                        // Update with clean text
+                                                        setMessages(prev => prev.map(msg =>
+                                                            msg.id === judgeMsgId
+                                                                ? { ...msg, parts: [{ type: "text" as const, text: cleanText }] }
+                                                                : msg
+                                                        ));
+
+                                                        // Save and stop
+                                                        await saveMessage(caseId, "assistant" as any, cleanText);
+                                                        reader.cancel();
+                                                        setIsPresenting(false);
+                                                        return;
+                                                    }
+                                                }
+
                                                 // Update message in real-time
                                                 setMessages(prev => prev.map(msg =>
                                                     msg.id === judgeMsgId
@@ -589,24 +702,22 @@ export default function SimulationView({ caseId }: { caseId: string }) {
                                                 ? { ...msg, parts: [{ type: "text" as const, text: accumulatedText.trim() }] }
                                                 : msg
                                         ));
-
-                                        await saveMessage(caseId, "system", accumulatedText.trim());
-                                        setTrialPhase("opening");
                                         console.log("Judge summary saved successfully, length:", accumulatedText.trim().length);
-                                    } else {
-                                        // Remove empty message
-                                        setMessages(prev => prev.filter(m => m.id !== judgeMsgId));
-                                        console.error("Empty response from API - no text accumulated. Buffer was:", buffer.substring(0, 100));
                                     }
-                                } catch (streamError) {
-                                    console.error("Streaming error:", streamError);
-                                    // Remove failed message
-                                    setMessages(prev => prev.filter(m => m.id !== judgeMsgId));
+                                    // Save the final message
+                                    if (accumulatedText.trim()) {
+                                        await saveMessage(caseId, "assistant" as any, accumulatedText.trim());
+                                    }
+                                } catch (e) {
+                                    console.error("Error reading stream:", e);
+                                } finally {
+                                    setIsPresenting(false); // Desbloquear auto-continue al terminar
                                 }
-                            } catch (error) {
-                                console.error("Error getting judge summary:", error);
+                            } catch (e) {
+                                console.error("Error in judge summary sequence:", e);
+                                setIsPresenting(false); // Asegurar desbloqueo en error
                             }
-                        }, 3000); // Wait 3 seconds after presentation before judge summary
+                        }, 1000); // Wait 3 seconds after presentation before judge summary
                     } catch (error) {
                         console.error("Error in presentation sequence:", error);
                         setPresentationStarted(false); // Reset on error to allow retry
@@ -615,7 +726,7 @@ export default function SimulationView({ caseId }: { caseId: string }) {
             }, 500); // Start presentation after 500ms
             return () => clearTimeout(timer);
         }
-    }, [caseAccepted, messages.length, isStreaming, input, caseId, presentationStarted]);
+    }, [caseAccepted, messages, messages.length, isStreaming, input, caseId, presentationStarted]);
 
     useEffect(() => {
         if (scrollRef.current) {

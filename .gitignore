@@ -42,9 +42,5 @@ next-env.d.ts
 
 /src/generated/prisma
 
-# next.js
-/.next/
-/out/
-
 dev.db
 *.db
